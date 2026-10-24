@@ -1,0 +1,16 @@
+[app]
+id = "com.zerone.tube"
+name = "Tube"
+caps = "TUBE"
+version = "0.1.0"
+entry = "main.py"
+icon = "icon.svg"
+description = "YouTube without an account or ads: NewPipe's idea, in the phone's design"
+requires = ["mpv", "python-mpv", "nodejs", "ffmpeg"]
+performance = "normal"
+
+[build]
+include = ["**/*.py", "**/*.svg"]
+
+[device]
+host = "ztos@172.16.42.1"
