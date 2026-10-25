@@ -20,7 +20,8 @@ class Downloads(QObject):
         rid = self.worker.call("download", lambda data, v=video: self._done(rid, data),
                                lambda err: self._failed(rid, err),
                                lambda p: self._progress(rid, p),
-                               video_id=video["id"], kind=kind, height=height)
+                               video_id=video["id"], kind=kind, height=height,
+                               fps=60 if library.setting("fps60") else 30)
         self.active[rid] = {"video": video, "kind": kind, "progress": 0.0}
         ztos.notify("Downloading", video.get("title", ""))
         self.changed.emit()

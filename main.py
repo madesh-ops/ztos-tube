@@ -367,6 +367,14 @@ def _now_playing_tile(video: dict):
 
 
 def _quit():
+    # Closed from the app switcher, the app ends even if mpv does not let go
+    # (a stuck decoder once kept it, and its sound, alive): three seconds for
+    # the goodbyes, then out.
+    import os
+    import threading
+    bail = threading.Timer(3.0, os._exit, (0,))
+    bail.daemon = True      # (a clean exit does not wait for it)
+    bail.start()
     ztos.tile_clear()
     playback.get().close()
     state.worker.close()

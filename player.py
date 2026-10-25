@@ -53,7 +53,11 @@ class Player(QObject):
         super().__init__()
         # hwdec: the phone's video codec where there is one (the M20's MFC, a
         # V4L2 decoder: frames are copied back for mpv's GL), software otherwise
-        self.mpv = mpv.MPV(vo="libmpv", hwdec="v4l2m2m-copy", ytdl=False, osc=False, input_default_bindings=False,
+        # (32 frames for the codec to decode into: FFmpeg's 20 are mostly the
+        # stream's own reference frames at 1080p60, which left mpv one or two
+        # and the picture a frame every few seconds)
+        self.mpv = mpv.MPV(vo="libmpv", hwdec="v4l2m2m-copy", vd_lavc_o="num_capture_buffers=32",
+                           ytdl=False, osc=False, input_default_bindings=False,
                            cache="yes", demuxer_max_bytes="48MiB", demuxer_readahead_secs=60,
                            keep_open="yes", audio_client_name="Tube", idle="yes",
                            osd_font_size=32, osd_bar_h=2.5, video_sync="audio",
@@ -130,7 +134,16 @@ class Player(QObject):
     def heights(self) -> list:
         if not self.video:
             return []
-        return sorted((self.video.get("streams") or {}).keys(), key=int)
+        return sorted(set(self.video.get("streams") or {}) | set(self.video.get("streams60") or {}), key=int)
+
+    def _stream(self, height: str) -> Optional[str]:
+        """The picture at that quality: at 60 frames a second where there is
+        one and the setting wants it, else at 30 or fewer."""
+        v = self.video or {}
+        smooth, plain = v.get("streams60") or {}, v.get("streams") or {}
+        if library.setting("fps60"):
+            return smooth.get(height) or plain.get(height)
+        return plain.get(height) or smooth.get(height)
 
     def _pick_height(self) -> str:
         wanted = int(library.setting("quality") or 720)
@@ -182,8 +195,8 @@ class Player(QObject):
         elif not self.with_video and v.get("audio"):
             self.mpv.loadfile(v["audio"], **options)
             self._loaded_video = False
-        elif v.get("streams") and v.get("audio") and self.height:
-            self.mpv.loadfile(v["streams"][self.height], audio_file=v["audio"], **options)
+        elif v.get("audio") and self.height and self._stream(self.height):
+            self.mpv.loadfile(self._stream(self.height), audio_file=v["audio"], **options)
             self._loaded_video = True
         elif v.get("muxed"):
             self.mpv.loadfile(v["muxed"], **options)
@@ -192,7 +205,7 @@ class Player(QObject):
             self.failed.emit("no stream to play")
 
     def set_height(self, height: str):
-        if self.video and height != self.height and height in (self.video.get("streams") or {}):
+        if self.video and height != self.height and height in self.heights():
             self.height = height
             if self.with_video:
                 self._load(self.pos)
@@ -226,10 +239,25 @@ class Player(QObject):
     def seek(self, seconds: float, relative: bool = False):
         if not self.video:
             return
+        target = self.pos + seconds if relative else seconds
+        if self._loaded_video and self.with_video and not self.video.get("live") and self._hw_decoding():
+            # The phone's video codec loses the stream's headers when mpv
+            # flushes it for a seek (H.264 in MP4 carries them once, at the
+            # start): it then decodes nothing, and the picture and sound stay
+            # put. A fresh load at the new place starts from a key frame with
+            # the headers, as opening a video does.
+            self._load(max(0.0, min(target, self.dur - 1.0) if self.dur else target))
+            return
         try:
             self.mpv.seek(seconds, "relative" if relative else "absolute")
         except SystemError:
             pass
+
+    def _hw_decoding(self) -> bool:
+        try:
+            return bool(self.mpv.hwdec_current) and self.mpv.hwdec_current != "no"
+        except Exception:
+            return False
 
     def osd(self, text: str = ""):
         try:
@@ -272,7 +300,7 @@ class VideoSurface(QOpenGLWindow):
         self.setFormat(fmt)
         self.player = player
         self.ctx = None
-        player._frame.connect(self.update, Qt.QueuedConnection)
+        player._frame.connect(self._new_frame, Qt.QueuedConnection)
         self._down = None
         self._last_tap = 0.0
         self._tap_timer = QTimer(self, singleShot=True, interval=280)
@@ -291,6 +319,23 @@ class VideoSurface(QOpenGLWindow):
             self.ctx.update_cb = None
             self.ctx.free()
             self.ctx = None
+
+    def _new_frame(self):
+        """mpv has a frame for us. On screen it is drawn; hidden (a page
+        turning, the poster in its place) it is taken without drawing. A frame
+        nobody takes stays in the decoder's buffers, and the phone's video
+        codec, out of buffers, stops: mpv, and every call into it, then waits
+        for good."""
+        if self.isExposed():
+            self.update()
+        elif self.ctx is not None:
+            try:
+                self.makeCurrent()
+                self.ctx.render(skip_rendering=True, block_for_target_time=False,
+                                opengl_fbo={"w": 1, "h": 1, "fbo": self.defaultFramebufferObject()})
+                self.doneCurrent()
+            except Exception:
+                pass
 
     def paintGL(self):
         if self.ctx is None:

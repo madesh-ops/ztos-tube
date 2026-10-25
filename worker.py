@@ -38,9 +38,23 @@ RELEASE_ZIP = "https://github.com/yt-dlp/yt-dlp/releases/download/{tag}/yt-dlp"
 CHECK_EVERY = 24 * 3600
 VIDEO_DIR = os.path.expanduser("~/Videos/Tube")
 AUDIO_DIR = os.path.expanduser("~/Music/Tube")
-# The quality ladder the player offers: H.264 at 30 frames a second or fewer
-# (the phone decodes on its CPU: 720p30 H.264 keeps up, VP9 and 60 fps don't)
+# The quality ladder the player offers, named as YouTube names it. Up to
+# 1080p: the screen is 1080 wide, and the M20's video codec decodes H.264 and
+# VP9 1080p60 several times faster than real time (more is wasted, and 4K does
+# not fit its buffers).
 HEIGHTS = (144, 240, 360, 480, 720, 1080)
+
+
+def quality(width: int, height: int):
+    """A stream's place on the ladder ("720"), or None above 1080p. Named by
+    its width as YouTube does, so a film letterboxed to 1920x800 is 1080p, and
+    by its shorter side when it stands upright (a 1080x1920 short)."""
+    if not width or not height:
+        return str(height) if height in HEIGHTS else None
+    side = width * 9 / 16 if width >= height else width
+    if side > 1080 * 1.2:
+        return None
+    return str(min(HEIGHTS, key=lambda h: abs(h - side)))
 
 _out = threading.Lock()
 _busy = 0
@@ -297,32 +311,49 @@ def op_video(video_id: str, live: bool = False):
             info = y.extract_info(url, download=False)
     # live: HLS, its picture and sound apart as well (the sound's codec unnamed)
     protocols = ("https", "http") + (("m3u8_native", "m3u8") if info.get("live_status") == "is_live" else ())
-    video, audio = {}, None
+    # picture: H.264 or VP9 (both decoded by the phone's video codec where it
+    # has one; never AV1), up to 1080p, by quality and by frame rate (up to 30
+    # and up to 60 apart). Sound: AAC, or Opus where there is no AAC.
+    video, video60, audio, opus, muxed = {}, {}, None, None, None
     for f in info.get("formats") or []:
         url = f.get("url")
         if not url or f.get("protocol") not in protocols:
             continue
         vcodec, acodec = f.get("vcodec") or "none", f.get("acodec") or "none"
-        if vcodec.startswith("avc1") and acodec == "none" and (f.get("fps") or 30) <= 30:
-            h = f.get("height") or 0
-            if h in HEIGHTS and (str(h) not in video or (f.get("tbr") or 0) > video[str(h)][1]):
-                video[str(h)] = (url, f.get("tbr") or 0)
+        rate = f.get("tbr") or f.get("abr") or (int(f["format_id"]) if str(f.get("format_id")).isdigit() else 0)
+        if vcodec != "none" and acodec != "none":
+            if vcodec.startswith(("avc1", "vp9", "vp09")) and (muxed is None or rate > muxed[1]):
+                muxed = (url, rate)
+        elif vcodec.startswith(("avc1", "vp9", "vp09")):
+            q = quality(f.get("width") or 0, f.get("height") or 0)
+            fps = f.get("fps") or 30
+            if q is None or fps > 60:
+                continue
+            into = video if fps <= 30 else video60
+            # H.264 before VP9 at the same quality, then the higher bitrate
+            score = (vcodec.startswith("avc1"), rate)
+            if q not in into or score > into[q][1]:
+                into[q] = (url, score)
         elif vcodec == "none" and (acodec.startswith("mp4a") or (acodec == "none" and f.get("protocol", "").startswith("m3u8"))):
-            rate = f.get("abr") or f.get("tbr") or (int(f["format_id"]) if str(f.get("format_id")).isdigit() else 0)
             if audio is None or rate > audio[1]:
                 audio = (url, rate)
-    muxed = None
-    if not video or audio is None:
-        # live streams and the odd old upload: a single stream with both
-        muxed = info.get("url") or (info.get("requested_formats") or [{}])[0].get("url")
+        elif vcodec == "none" and acodec == "opus":
+            if opus is None or rate > opus[1]:
+                opus = (url, rate)
+    audio = audio or opus
+    if (video or video60) and audio is not None:
+        muxed = None
+    elif muxed is None and info.get("live_status") == "is_live":
+        muxed = (info.get("url"), 0)    # a live stream's single HLS
     out = entry(info)
     out.update({
         "description": info.get("description") or "",
         "likes": info.get("like_count"),
         "subscribers": info.get("channel_follower_count"),
         "streams": {h: u for h, (u, _) in video.items()},
+        "streams60": {h: u for h, (u, _) in video60.items()},
         "audio": audio[0] if audio else None,
-        "muxed": muxed,
+        "muxed": muxed[0] if muxed else None,
         "headers": info.get("http_headers") or {},
         "chapters": [{"title": c.get("title"), "start": c.get("start_time")} for c in info.get("chapters") or []],
         "resolved": int(time.time()),
@@ -391,14 +422,18 @@ def _safe(fn, *args):
 
 # ---- downloads ---------------------------------------------------------------------
 
-def op_download(req_id: int, video_id: str, kind: str = "video", height: int = 720):
+def op_download(req_id: int, video_id: str, kind: str = "video", height: int = 720, fps: int = 30):
     if kind == "audio":
         folder = AUDIO_DIR
         fmt = "ba[acodec^=mp4a]/ba"
     else:
         folder = VIDEO_DIR
-        fmt = (f"bv*[height<={height}][vcodec^=avc1][fps<=30]+ba[acodec^=mp4a]/"
-               f"b[height<={height}][vcodec^=avc1]/b[height<={height}]")
+        # as op_video plays: H.264 (or VP9) up to the quality by the shorter
+        # side (a letterboxed film is narrower than it is wide), never AV1
+        size = f"[width<={height * 16 // 9 + 8}]" if height else ""
+        pic = f"[vcodec~='^(avc1|vp0?9)'][fps<={fps}]"
+        fmt = (f"bv*{size}{pic}+ba[acodec^=mp4a]/bv*{size}{pic}+ba/"
+               f"b{size}[vcodec~='^(avc1|vp0?9)']/b{size}")
     os.makedirs(folder, exist_ok=True)
     result = {}
     last = [0.0]

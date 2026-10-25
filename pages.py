@@ -42,10 +42,13 @@ def freeze_video():
     page = box.parentWidget()
     while page is not None and not isinstance(page, VideoPage):
         page = page.parentWidget()
+    # the surface out of the slot's layout first: both shown for a moment, they
+    # split its height, and the turn pictured the poster at half of it
+    box.hide()
     if page is not None:
         page.poster.show_frame(playback.get().last_frame)
         page.poster.show()
-    box.hide()
+        page.slot_layout.activate()
 
 
 def open_video(video: dict, local: Optional[dict] = None):
@@ -291,6 +294,11 @@ class VideoPage(ztos.Page):
         if not self._mine():
             return
         if self.p.with_video:
+            if not self.isVisible():
+                # not in place yet (its stream was known before the page was
+                # pushed): a native surface shown now would stand on the screen
+                # before the page does. showEvent attaches it.
+                return
             if state.app.turning():
                 # the native picture cannot turn with the page (freeze_video):
                 # the poster stands in until the page is still
@@ -326,6 +334,7 @@ class VideoPage(ztos.Page):
                 box.hide()
                 self.poster.show_frame(self.p.last_frame)
                 self.poster.show()
+                self.slot_layout.activate()
             if not self._attach_pending:
                 self._attach_pending = True
                 QTimer.singleShot(0, self._attach_later)
@@ -624,7 +633,9 @@ class SettingsPage(ztos.Page):
         self.section("HIGHEST QUALITY")
         self.add(Words([("360", "360p"), ("480", "480p"), ("720", "720p"), ("1080", "1080p")],
                        library.setting("quality"), lambda k: library.set_setting("quality", k)))
-        self.text("The phone decodes video on its processor: 1080p may stutter.", size=12, color=ztos.GREY)
+        self.toggle("60 frames a second", library.setting("fps60"),
+                    lambda on: library.set_setting("fps60", on))
+        self.text("Smoother where a video has it, for twice the data.", size=12, color=ztos.GREY)
         self.toggle("Play in the background", library.setting("background"),
                     lambda on: library.set_setting("background", on))
         self.toggle("Start where I stopped", library.setting("resume"),

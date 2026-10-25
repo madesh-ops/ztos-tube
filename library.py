@@ -32,6 +32,7 @@ def save():
 
 DEFAULTS = {
     "quality": "720",           # the highest the player picks on its own
+    "fps60": True,              # 60 frames a second where a video has them
     "background": True,         # keep playing (sound only) when the app is left
     "region": "global",         # "what's hot": which charts
     "resume": True,             # start where you stopped
