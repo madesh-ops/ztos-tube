@@ -51,7 +51,9 @@ class Player(QObject):
 
     def __init__(self):
         super().__init__()
-        self.mpv = mpv.MPV(vo="libmpv", hwdec="no", ytdl=False, osc=False, input_default_bindings=False,
+        # hwdec: the phone's video codec where there is one (the M20's MFC, a
+        # V4L2 decoder: frames are copied back for mpv's GL), software otherwise
+        self.mpv = mpv.MPV(vo="libmpv", hwdec="v4l2m2m-copy", ytdl=False, osc=False, input_default_bindings=False,
                            cache="yes", demuxer_max_bytes="48MiB", demuxer_readahead_secs=60,
                            keep_open="yes", audio_client_name="Tube", idle="yes",
                            osd_font_size=32, osd_bar_h=2.5, video_sync="audio",
